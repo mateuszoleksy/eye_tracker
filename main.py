@@ -4,13 +4,13 @@ import matplotlib.pyplot as plt
 from tensorflow import keras
 import numpy as np
 import os
-from sklearn.model_selection import train_test_split
+from sklearn import train_test_split
 
 
 def load_and_preprocess_image(image_path, augment=False):
-    """Load and preprocess a single image"""
     image = tf.io.read_file(image_path)
     # Detect file type and decode accordingly
+    # we are chosing between diffrent codec, png or jpeg
     if tf.strings.regex_full_match(image_path, ".*\\.png"):
         image = tf.image.decode_png(image, channels=3)
     else:
@@ -18,32 +18,12 @@ def load_and_preprocess_image(image_path, augment=False):
     
     image = tf.image.resize(image, [218, 178])  # Resize to 218 height x 178 width
     image = tf.cast(image, tf.float32) / 255.0  # Normalize to [0, 1]
-    
-    # Bardzo agresywna augmentacja dla walki z overfittingiem (bez tensorflow-addons)
-    if augment:
-        image = tf.image.random_brightness(image, 0.3)
-        image = tf.image.random_contrast(image, 0.5, 1.5)
-        image = tf.image.random_saturation(image, 0.5, 1.5)
-        image = tf.image.random_hue(image, 0.2)
-        if tf.random.uniform([]) < 0.5:
-            image = tf.image.random_jpeg_quality(image, 50, 100)
-        image = tf.image.random_flip_left_right(image)
-        image = tf.clip_by_value(image, 0.0, 1.0)
+    # normalization for less data size
     
     return image
 
-def augment_data(images, labels, augmentation_factor=2):
-    return tf.stack(images), np.array(labels)
-
-def augment_image(image, label):
-    image = tf.image.random_brightness(image, 0.2)
-    image = tf.image.random_contrast(image, 0.7, 1.3)
-    image = tf.image.random_saturation(image, 0.7, 1.3)
-    image = tf.image.random_hue(image, 0.1)
-    image = tf.clip_by_value(image, 0.0, 1.0)
-    return image, label
-
 def load_data():
+    # main dataset loading
     df = pd.read_csv("dataset/list_landmarks_align_celeba.txt", sep=" ", skipinitialspace=True)
     image_paths = ["photos/hongkong/" + name for name in df["filename"]]
     
@@ -68,8 +48,7 @@ def load_data():
     return image_paths, labels
 
 def create_model():
-    # Bardziej złożony model dla lepszej dokładności
-    # Model z regularizacją L2 i większym dropoutem, uproszczony
+    # Model with 3 convolutional layers 
     l2 = keras.regularizers.l2(0.001)
     model = keras.Sequential([
         keras.layers.InputLayer(input_shape=(218, 178, 3)),
@@ -95,7 +74,7 @@ def create_model():
     return model
 
 def main():
-    # Ograniczenie pamięci GPU
+    # for rtx purposes
     gpus = tf.config.experimental.list_physical_devices('GPU')
     if gpus:
         try:
@@ -108,8 +87,7 @@ def main():
     
     print(f"Found {len(image_paths)} images")
     labels = np.array(labels, dtype=np.float32)
-
-    # Podziel indeksy zamiast ładować wszystkie obrazy
+    
     from sklearn.model_selection import train_test_split
     train_idx, val_idx = train_test_split(np.arange(len(image_paths)), test_size=0.2, random_state=42)
     
@@ -119,12 +97,9 @@ def main():
     val_labels = labels[val_idx]
 
     print(f"Training set: {len(train_image_paths)} samples")
-    print(f"Validation set: {len(val_image_paths)} samples")
-
-    # Funkcja do ładowania obrazów w locie
+    print(f"Validation set: {len(val_image_paths)} samples")    # Funkcja do ładowania obrazów w locie
     def preprocess_train(path, label):
         image = load_and_preprocess_image(path)
-        image, label = augment_image(image, label)
         return image, label[:4]
     
     def preprocess_val(path, label):
@@ -134,6 +109,7 @@ def main():
     model = create_model()
     print(model.summary())
 
+    # loading trained model on RTX
     model_path = "model/eye_tracking_model_both_eyes.keras"
     if os.path.exists(model_path):
         print("Loading existing model...")
@@ -149,7 +125,7 @@ def main():
         if not os.path.exists("model"):
             os.makedirs("model")
 
-        # Tworzenie datasetów z ładowaniem obrazów w locie - mniejszy batch size
+        # Create TensorFlow datasets for training and validation
         train_dataset = tf.data.Dataset.from_tensor_slices((train_image_paths, train_labels))
         train_dataset = train_dataset.map(preprocess_train, num_parallel_calls=tf.data.AUTOTUNE)
         train_dataset = train_dataset.shuffle(buffer_size=100).batch(8).prefetch(tf.data.AUTOTUNE)
@@ -158,6 +134,7 @@ def main():
         val_dataset = val_dataset.map(preprocess_val, num_parallel_calls=tf.data.AUTOTUNE)
         val_dataset = val_dataset.batch(8).prefetch(tf.data.AUTOTUNE)
 
+        # Callbacks for training
         callbacks = [
             keras.callbacks.EarlyStopping(patience=8, restore_best_weights=True, monitor='val_loss'),  # Szybsze zatrzymanie
             keras.callbacks.ReduceLROnPlateau(factor=0.5, patience=4, monitor='val_loss', min_lr=1e-7),
